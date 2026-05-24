@@ -22,7 +22,8 @@ $script:ProgressTotal = 100
 $script:ProgressCurrent = 0
 $script:ProgressCallback = $null
 $script:EventPrefix = "__LAT_EVENT__:"
-$script:InstallerVersion = "1.0.6"
+$script:InstallerVersion = "1.0.7"
+$script:InstallerGuiState = $null
 $script:IsWorkerMode = [bool]$WorkerMode
 $script:InstallerLogPath = $LogPath
 $script:InstallerSessionId = [guid]::NewGuid().ToString("N").Substring(0, 8)
@@ -151,24 +152,42 @@ function ConvertFrom-LatInstallerEventLine([string]$Line) {
   }
 }
 
-function Set-LatInstallerCompletedUi($UiContext, [string]$Version, [string]$InstallRoot, [bool]$Success, [string]$Message) {
+function Get-LatInstallerGuiStateSummary($State) {
+  if ($null -eq $State) { return "state=False" }
+  $parts = @(
+    "state=True",
+    "ProgressBar=" + ($null -ne $State.ProgressBar),
+    "StatusText=" + ($null -ne $State.StatusText),
+    "ResultText=" + ($null -ne $State.ResultText),
+    "LogBox=" + ($null -ne $State.LogBox),
+    "InstallButton=" + ($null -ne $State.InstallButton),
+    "CloseButton=" + ($null -ne $State.CloseButton),
+    "Dispatcher=" + ($null -ne $State.Dispatcher)
+  )
+  return ($parts -join " ")
+}
+
+function Set-LatInstallerCompletedUi([string]$Version, [string]$InstallRoot, [bool]$Success, [string]$Message) {
+  $state = $script:InstallerGuiState
   $logBox = $null
-  if ($null -eq $UiContext) {
-    Add-LatInstallerGuiLog $logBox "ERROR: Completed UI update skipped: ui context is null"
+  if ($null -eq $state) {
+    Add-LatInstallerGuiLog $logBox "ERROR: Completed UI update skipped: installer GUI state is null"
     return
   }
 
   try {
-    $logBox = $UiContext.LogBox
+    $logBox = $state.LogBox
   } catch {
   }
 
+  Add-LatInstallerGuiLog $logBox ("Completed UI update requested: success={0} version={1} install_root={2} {3}" -f $Success, $Version, $InstallRoot, (Get-LatInstallerGuiStateSummary $state))
+
   try {
-    $progress = $UiContext.ProgressBar
-    $status = $UiContext.StatusText
-    $result = $UiContext.ResultText
-    $install = $UiContext.InstallButton
-    $close = $UiContext.CloseButton
+    $progress = $state.ProgressBar
+    $status = $state.StatusText
+    $result = $state.ResultText
+    $install = $state.InstallButton
+    $close = $state.CloseButton
 
     $statusTextValue = "Failed"
     $resultTextValue = $Message
@@ -205,13 +224,14 @@ function Set-LatInstallerCompletedUi($UiContext, [string]$Version, [string]$Inst
     if (-not [string]::IsNullOrWhiteSpace($InstallRoot)) {
       Add-LatInstallerGuiLog $logBox ("Install success at " + $InstallRoot)
     }
+    Add-LatInstallerGuiLog $logBox ("Completed UI update applied: success={0} status={1}" -f $Success, $statusTextValue)
   } catch {
     Add-LatInstallerGuiLog $logBox ("ERROR: Completed UI update failed: " + $_.Exception.Message)
   }
 
   try {
-    if ($null -ne $UiContext.Dispatcher) {
-      [void]$UiContext.Dispatcher.Invoke([System.Action]{}, [System.Windows.Threading.DispatcherPriority]::Render)
+    if ($null -ne $state.Dispatcher) {
+      [void]$state.Dispatcher.Invoke([System.Action]{}, [System.Windows.Threading.DispatcherPriority]::Render)
     }
   } catch {
   }
@@ -625,7 +645,7 @@ function Show-InstallerWindow {
   $installButton = $window.FindName("InstallButton")
   $closeButton = $window.FindName("CloseButton")
   $browseButton = $window.FindName("BrowseButton")
-  $uiContext = [pscustomobject]@{
+  $script:InstallerGuiState = [pscustomobject]@{
     ProgressBar = $progressBar
     StatusText = $statusText
     ResultText = $resultText
@@ -637,6 +657,7 @@ function Show-InstallerWindow {
   if ($null -eq $window -or $null -eq $installButton -or $null -eq $statusText -or $null -eq $resultText -or $null -eq $logBox -or $null -eq $channelBox) {
     throw "Installer GUI is missing required controls after XAML load."
   }
+  Add-LatInstallerGuiLog $logBox ("GUI state initialized: " + (Get-LatInstallerGuiStateSummary $script:InstallerGuiState))
 
   try {
     $unhandledHandler = [System.Windows.Threading.DispatcherUnhandledExceptionEventHandler]{
@@ -694,6 +715,7 @@ function Show-InstallerWindow {
         NoAutoStart = (-not [bool]$startupTaskCheck.IsChecked)
         GitHubToken = $GitHubToken
       }
+      Add-LatInstallerGuiLog $logBox ("Install clicked: channel={0} tag={1} install_dir={2} no_start={3} no_desktop_shortcut={4} no_auto_start={5}" -f $config.Channel, $config.Tag, $config.InstallDir, $config.NoStart, $config.NoDesktopShortcut, $config.NoAutoStart)
 
       $scriptPath = $PSCommandPath
       if ([string]::IsNullOrWhiteSpace($scriptPath)) {
@@ -743,6 +765,7 @@ function Show-InstallerWindow {
       }
 
       try {
+        Add-LatInstallerGuiLog $logBox ("Starting installer worker process: args_count=" + $args.Count)
         $proc = Start-Process -FilePath "powershell.exe" -ArgumentList $args -PassThru -WindowStyle Hidden -RedirectStandardOutput $workerStdOut -RedirectStandardError $workerStdErr
       } catch {
         $msg = "Failed to start installer worker: $($_.Exception.Message)"
@@ -790,8 +813,10 @@ function Show-InstallerWindow {
                 } elseif ($evt.kind -eq "result") {
                   $state.ResultVersion = [string]$evt.version
                   $state.ResultInstallRoot = [string]$evt.install_root
+                  Add-LatInstallerGuiLog $logBox ("Worker result event: version={0} install_root={1}" -f $state.ResultVersion, $state.ResultInstallRoot)
                 } elseif ($evt.kind -eq "error") {
                   $state.ErrorMessage = [string]$evt.message
+                  Add-LatInstallerGuiLog $logBox ("Worker error event: " + $state.ErrorMessage)
                 }
               } else {
                 Add-LatInstallerGuiLog $logBox $line
@@ -818,14 +843,15 @@ function Show-InstallerWindow {
             $exitCodeText = [string]$proc.ExitCode
             $hasResult = (-not [string]::IsNullOrWhiteSpace($state.ResultVersion)) -or (-not [string]::IsNullOrWhiteSpace($state.ResultInstallRoot))
             $isSuccess = [string]::IsNullOrWhiteSpace($state.ErrorMessage) -and (($proc.ExitCode -eq 0) -or ([string]::IsNullOrWhiteSpace($exitCodeText) -and $hasResult))
+            Add-LatInstallerGuiLog $logBox ("Worker exited: exit_code={0} has_result={1} error_empty={2} success={3}" -f $exitCodeText, $hasResult, [string]::IsNullOrWhiteSpace($state.ErrorMessage), $isSuccess)
             if ($isSuccess) {
-              Set-LatInstallerCompletedUi $uiContext $state.ResultVersion $state.ResultInstallRoot $true ""
+              Set-LatInstallerCompletedUi $state.ResultVersion $state.ResultInstallRoot $true ""
               [System.Windows.MessageBox]::Show("Install completed successfully.", "LAT Installer", "OK", "Information") | Out-Null
             } else {
               $displayExitCode = if ([string]::IsNullOrWhiteSpace($exitCodeText)) { "unknown" } else { $exitCodeText }
               $msg = if ([string]::IsNullOrWhiteSpace($state.ErrorMessage)) { "Installer worker failed with exit code $displayExitCode. See log: $workerLog" } else { $state.ErrorMessage }
               Add-LatInstallerGuiLog $logBox ("ERROR: " + $msg)
-              Set-LatInstallerCompletedUi $uiContext "" "" $false ("Installation failed: " + $msg)
+              Set-LatInstallerCompletedUi "" "" $false ("Installation failed: " + $msg)
               [System.Windows.MessageBox]::Show("Install failed: $msg", "LAT Installer", "OK", "Error") | Out-Null
             }
             try { Remove-Item -LiteralPath $workerStdOut -Force -ErrorAction SilentlyContinue } catch {}
@@ -838,7 +864,7 @@ function Show-InstallerWindow {
           $msg = "GUI worker monitor failed: $($_.Exception.Message)"
           Add-LatInstallerGuiLog $logBox ("ERROR: " + $msg)
           Add-LatInstallerGuiLog $logBox (Format-ExceptionDetail $_)
-          Set-LatInstallerCompletedUi $uiContext "" "" $false ("Installation failed: " + $msg)
+          Set-LatInstallerCompletedUi "" "" $false ("Installation failed: " + $msg)
           [System.Windows.MessageBox]::Show($msg, "LAT Installer", "OK", "Error") | Out-Null
         }
   }.GetNewClosure())
