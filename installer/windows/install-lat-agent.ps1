@@ -22,7 +22,7 @@ $script:ProgressTotal = 100
 $script:ProgressCurrent = 0
 $script:ProgressCallback = $null
 $script:EventPrefix = "__LAT_EVENT__:"
-$script:InstallerVersion = "1.0.2"
+$script:InstallerVersion = "1.0.3"
 $script:IsWorkerMode = [bool]$WorkerMode
 $script:InstallerLogPath = $LogPath
 $script:InstallerSessionId = [guid]::NewGuid().ToString("N").Substring(0, 8)
@@ -745,7 +745,11 @@ function Show-InstallerWindow {
             $isSuccess = [string]::IsNullOrWhiteSpace($state.ErrorMessage) -and (($proc.ExitCode -eq 0) -or ([string]::IsNullOrWhiteSpace($exitCodeText) -and $hasResult))
             if ($isSuccess) {
               Set-LatInstallerProgressState $progressBar 100 $false
-              Set-LatInstallerStatus $statusText $logBox (if ([string]::IsNullOrWhiteSpace($state.ResultVersion)) { "Done" } else { "Done: " + $state.ResultVersion })
+              $doneStatus = "Done"
+              if (-not [string]::IsNullOrWhiteSpace($state.ResultVersion)) {
+                $doneStatus = "Done: " + $state.ResultVersion
+              }
+              Set-LatInstallerStatus $statusText $logBox $doneStatus
               if (-not [string]::IsNullOrWhiteSpace($state.ResultInstallRoot)) {
                 Add-LatInstallerGuiLog $logBox ("Install success at " + $state.ResultInstallRoot)
               } else {
