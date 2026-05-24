@@ -22,7 +22,7 @@ $script:ProgressTotal = 100
 $script:ProgressCurrent = 0
 $script:ProgressCallback = $null
 $script:EventPrefix = "__LAT_EVENT__:"
-$script:InstallerVersion = "1.0.1"
+$script:InstallerVersion = "1.0.2"
 $script:IsWorkerMode = [bool]$WorkerMode
 $script:InstallerLogPath = $LogPath
 $script:InstallerSessionId = [guid]::NewGuid().ToString("N").Substring(0, 8)
@@ -62,7 +62,9 @@ function Emit-InstallerEvent([string]$Kind, [hashtable]$Payload) {
 
 function Write-Info([string]$Message) {
   $line = "[LAT-INSTALL][$($script:InstallerRole)][installer_version=$($script:InstallerVersion)][sid=$($script:InstallerSessionId)][pid=$PID] $Message"
-  Write-Host $line
+  if (-not $script:IsWorkerMode) {
+    Write-Host $line
+  }
   Append-InstallerLog $line
   Emit-InstallerEvent "log" @{ message = $Message }
 }
@@ -70,53 +72,82 @@ function Write-Info([string]$Message) {
 function Add-LatInstallerGuiLog($LogBox, [string]$Line) {
   $now = Get-Date -Format "HH:mm:ss"
   $entry = "[$now] $Line"
-  if ($null -ne $LogBox) {
-    $LogBox.AppendText("$entry`r`n")
-    $LogBox.ScrollToEnd()
+  try {
+    if ($null -ne $LogBox) {
+      $LogBox.AppendText("$entry`r`n")
+      $LogBox.ScrollToEnd()
+    }
+  } catch {
   }
   Append-InstallerLog $entry
 }
 
 function Set-LatInstallerControlText($Control, [string]$Value) {
   if ($null -eq $Control) { return $false }
-  if ($Control.PSObject.Properties.Match("Text").Count -gt 0) {
+  try {
     $Control.Text = $Value
     return $true
+  } catch {
   }
-  if ($Control.PSObject.Properties.Match("Content").Count -gt 0) {
+  try {
     $Control.Content = $Value
     return $true
+  } catch {
   }
   return $false
 }
 
 function Set-LatInstallerStatus($StatusText, $LogBox, [string]$Value) {
-  if (-not (Set-LatInstallerControlText $StatusText $Value)) {
-    Add-LatInstallerGuiLog $LogBox "WARN: Status control does not support Text/Content."
-  }
+  [void](Set-LatInstallerControlText $StatusText $Value)
 }
 
 function Set-LatInstallerResult($ResultText, [string]$Value, [string]$Kind) {
   if (-not (Set-LatInstallerControlText $ResultText $Value)) { return }
-  if ($Kind -eq "success") {
-    $ResultText.Foreground = [System.Windows.Media.Brushes]::ForestGreen
-  } elseif ($Kind -eq "error") {
-    $ResultText.Foreground = [System.Windows.Media.Brushes]::Firebrick
-  } else {
-    $ResultText.Foreground = [System.Windows.Media.Brushes]::Gray
+  try {
+    if ($Kind -eq "success") {
+      $ResultText.Foreground = [System.Windows.Media.Brushes]::ForestGreen
+    } elseif ($Kind -eq "error") {
+      $ResultText.Foreground = [System.Windows.Media.Brushes]::Firebrick
+    } else {
+      $ResultText.Foreground = [System.Windows.Media.Brushes]::Gray
+    }
+  } catch {
   }
 }
 
 function Set-LatInstallerProgressState($ProgressBar, [double]$Value, [Nullable[bool]]$Indeterminate) {
   if ($null -eq $ProgressBar) { return }
   if ($Indeterminate -ne $null) {
-    if ($ProgressBar.PSObject.Properties.Match("IsIndeterminate").Count -gt 0) {
+    try {
       $ProgressBar.IsIndeterminate = [bool]$Indeterminate
+    } catch {
     }
   }
-  if ($ProgressBar.PSObject.Properties.Match("Value").Count -gt 0) {
+  try {
     $next = [Math]::Max(0, [Math]::Min(100, $Value))
     $ProgressBar.Value = $next
+  } catch {
+  }
+}
+
+function Set-LatInstallerControlEnabled($Control, [bool]$Enabled) {
+  if ($null -eq $Control) { return }
+  try {
+    $Control.IsEnabled = $Enabled
+  } catch {
+  }
+}
+
+function ConvertFrom-LatInstallerEventLine([string]$Line) {
+  $prefix = "__LAT_EVENT__:"
+  if ([string]::IsNullOrWhiteSpace($Line) -or -not $Line.StartsWith($prefix)) {
+    return [pscustomobject]@{ IsEvent = $false; Event = $null; Error = $null }
+  }
+  try {
+    $json = $Line.Substring($prefix.Length)
+    return [pscustomobject]@{ IsEvent = $true; Event = ($json | ConvertFrom-Json); Error = $null }
+  } catch {
+    return [pscustomobject]@{ IsEvent = $true; Event = $null; Error = $_.Exception.Message }
   }
 }
 
@@ -569,8 +600,8 @@ function Show-InstallerWindow {
 
   $installButton.Add_Click({
     try {
-      $installButton.IsEnabled = $false
-      $closeButton.IsEnabled = $false
+      Set-LatInstallerControlEnabled $installButton $false
+      Set-LatInstallerControlEnabled $closeButton $false
       Set-LatInstallerProgressState $progressBar 0 $true
       Set-LatInstallerStatus $statusText $logBox "Starting installer worker..."
       Set-LatInstallerResult $resultText "Installing... please wait." "info"
@@ -599,8 +630,8 @@ function Show-InstallerWindow {
         Set-LatInstallerStatus $statusText $logBox "Failed"
         Add-LatInstallerGuiLog $logBox "ERROR: $msg"
         Set-LatInstallerResult $resultText ("Installation failed: " + $msg) "error"
-        $installButton.IsEnabled = $true
-        $closeButton.IsEnabled = $true
+        Set-LatInstallerControlEnabled $installButton $true
+        Set-LatInstallerControlEnabled $closeButton $true
         [System.Windows.MessageBox]::Show($msg, "LAT Installer", "OK", "Error") | Out-Null
         return
       }
@@ -643,8 +674,8 @@ function Show-InstallerWindow {
         Set-LatInstallerStatus $statusText $logBox "Failed"
         Add-LatInstallerGuiLog $logBox "ERROR: $msg"
         Set-LatInstallerResult $resultText ("Installation failed: " + $msg) "error"
-        $installButton.IsEnabled = $true
-        $closeButton.IsEnabled = $true
+        Set-LatInstallerControlEnabled $installButton $true
+        Set-LatInstallerControlEnabled $closeButton $true
         [System.Windows.MessageBox]::Show($msg, "LAT Installer", "OK", "Error") | Out-Null
         return
       }
@@ -669,23 +700,23 @@ function Show-InstallerWindow {
             for ($i = $state.LastOutLine; $i -lt $outLines.Count; $i++) {
               $line = [string]$outLines[$i]
               if ([string]::IsNullOrWhiteSpace($line)) { continue }
-              if ($line.StartsWith($script:EventPrefix)) {
-                $json = $line.Substring($script:EventPrefix.Length)
-                try {
-                  $evt = $json | ConvertFrom-Json
-                  if ($evt.kind -eq "progress") {
-                    Set-LatInstallerProgressState $progressBar ([double]$evt.percent) $false
-                    Set-LatInstallerStatus $statusText $logBox ([string]$evt.status)
-                  } elseif ($evt.kind -eq "log") {
-                    Add-LatInstallerGuiLog $logBox ([string]$evt.message)
-                  } elseif ($evt.kind -eq "result") {
-                    $state.ResultVersion = [string]$evt.version
-                    $state.ResultInstallRoot = [string]$evt.install_root
-                  } elseif ($evt.kind -eq "error") {
-                    $state.ErrorMessage = [string]$evt.message
-                  }
-                } catch {
-                  Add-LatInstallerGuiLog $logBox ("WARN: Failed to parse worker event line: " + $line)
+              $parsed = ConvertFrom-LatInstallerEventLine $line
+              if ($parsed.IsEvent) {
+                if (-not [string]::IsNullOrWhiteSpace([string]$parsed.Error)) {
+                  Add-LatInstallerGuiLog $logBox ("WARN: Invalid worker event JSON: " + $parsed.Error)
+                  continue
+                }
+                $evt = $parsed.Event
+                if ($evt.kind -eq "progress") {
+                  Set-LatInstallerProgressState $progressBar ([double]$evt.percent) $false
+                  Set-LatInstallerStatus $statusText $logBox ([string]$evt.status)
+                } elseif ($evt.kind -eq "log") {
+                  Add-LatInstallerGuiLog $logBox ([string]$evt.message)
+                } elseif ($evt.kind -eq "result") {
+                  $state.ResultVersion = [string]$evt.version
+                  $state.ResultInstallRoot = [string]$evt.install_root
+                } elseif ($evt.kind -eq "error") {
+                  $state.ErrorMessage = [string]$evt.message
                 }
               } else {
                 Add-LatInstallerGuiLog $logBox $line
@@ -708,7 +739,11 @@ function Show-InstallerWindow {
           if ($proc.HasExited -and -not $state.Completed) {
             $state.Completed = $true
             $timer.Stop()
-            if ($proc.ExitCode -eq 0 -and [string]::IsNullOrWhiteSpace($state.ErrorMessage)) {
+            try { $proc.Refresh() } catch {}
+            $exitCodeText = [string]$proc.ExitCode
+            $hasResult = (-not [string]::IsNullOrWhiteSpace($state.ResultVersion)) -or (-not [string]::IsNullOrWhiteSpace($state.ResultInstallRoot))
+            $isSuccess = [string]::IsNullOrWhiteSpace($state.ErrorMessage) -and (($proc.ExitCode -eq 0) -or ([string]::IsNullOrWhiteSpace($exitCodeText) -and $hasResult))
+            if ($isSuccess) {
               Set-LatInstallerProgressState $progressBar 100 $false
               Set-LatInstallerStatus $statusText $logBox (if ([string]::IsNullOrWhiteSpace($state.ResultVersion)) { "Done" } else { "Done: " + $state.ResultVersion })
               if (-not [string]::IsNullOrWhiteSpace($state.ResultInstallRoot)) {
@@ -719,15 +754,16 @@ function Show-InstallerWindow {
               Set-LatInstallerResult $resultText "Installation completed successfully. You can close this window." "success"
               [System.Windows.MessageBox]::Show("Install completed successfully.", "LAT Installer", "OK", "Information") | Out-Null
             } else {
-              $msg = if ([string]::IsNullOrWhiteSpace($state.ErrorMessage)) { "Installer worker failed with exit code $($proc.ExitCode). See log: $workerLog" } else { $state.ErrorMessage }
+              $displayExitCode = if ([string]::IsNullOrWhiteSpace($exitCodeText)) { "unknown" } else { $exitCodeText }
+              $msg = if ([string]::IsNullOrWhiteSpace($state.ErrorMessage)) { "Installer worker failed with exit code $displayExitCode. See log: $workerLog" } else { $state.ErrorMessage }
               Set-LatInstallerProgressState $progressBar 0 $false
               Set-LatInstallerStatus $statusText $logBox "Failed"
               Add-LatInstallerGuiLog $logBox ("ERROR: " + $msg)
               Set-LatInstallerResult $resultText ("Installation failed: " + $msg) "error"
               [System.Windows.MessageBox]::Show("Install failed: $msg", "LAT Installer", "OK", "Error") | Out-Null
             }
-            $installButton.IsEnabled = $true
-            $closeButton.IsEnabled = $true
+            Set-LatInstallerControlEnabled $installButton $true
+            Set-LatInstallerControlEnabled $closeButton $true
             try { Remove-Item -LiteralPath $workerStdOut -Force -ErrorAction SilentlyContinue } catch {}
             try { Remove-Item -LiteralPath $workerStdErr -Force -ErrorAction SilentlyContinue } catch {}
           }
@@ -741,8 +777,8 @@ function Show-InstallerWindow {
           Add-LatInstallerGuiLog $logBox ("ERROR: " + $msg)
           Add-LatInstallerGuiLog $logBox (Format-ExceptionDetail $_)
           Set-LatInstallerResult $resultText ("Installation failed: " + $msg) "error"
-          $installButton.IsEnabled = $true
-          $closeButton.IsEnabled = $true
+          Set-LatInstallerControlEnabled $installButton $true
+          Set-LatInstallerControlEnabled $closeButton $true
           [System.Windows.MessageBox]::Show($msg, "LAT Installer", "OK", "Error") | Out-Null
         }
   }.GetNewClosure())
@@ -753,8 +789,8 @@ function Show-InstallerWindow {
       Add-LatInstallerGuiLog $logBox ("ERROR: Install click handler failed: " + $_.Exception.Message)
       Add-LatInstallerGuiLog $logBox (Format-ExceptionDetail $_)
       Set-LatInstallerResult $resultText ("Installation failed: " + $_.Exception.Message) "error"
-      $installButton.IsEnabled = $true
-      $closeButton.IsEnabled = $true
+      Set-LatInstallerControlEnabled $installButton $true
+      Set-LatInstallerControlEnabled $closeButton $true
       [System.Windows.MessageBox]::Show("Install failed: " + $_.Exception.Message, "LAT Installer", "OK", "Error") | Out-Null
     }
   }.GetNewClosure())
