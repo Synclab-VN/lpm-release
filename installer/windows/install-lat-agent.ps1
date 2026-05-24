@@ -516,6 +516,20 @@ function Show-InstallerWindow {
     }
   }
 
+  $setProgressState = {
+    param([double]$value, [Nullable[bool]]$indeterminate)
+    if ($null -eq $progressBar) { return }
+    if ($indeterminate -ne $null) {
+      if ($progressBar.PSObject.Properties.Match("IsIndeterminate").Count -gt 0) {
+        $progressBar.IsIndeterminate = [bool]$indeterminate
+      }
+    }
+    if ($progressBar.PSObject.Properties.Match("Value").Count -gt 0) {
+      $next = [Math]::Max(0, [Math]::Min(100, $value))
+      $progressBar.Value = $next
+    }
+  }
+
   $browseButton.Add_Click({
     Add-Type -AssemblyName System.Windows.Forms
     $dialog = New-Object System.Windows.Forms.FolderBrowserDialog
@@ -531,8 +545,7 @@ function Show-InstallerWindow {
     try {
       $installButton.IsEnabled = $false
       $closeButton.IsEnabled = $false
-      $progressBar.Value = 0
-      $progressBar.IsIndeterminate = $true
+      & $setProgressState 0 $true
       & $setStatus "Starting installer worker..."
       & $setResult "Installing... please wait." "info"
 
@@ -635,8 +648,7 @@ function Show-InstallerWindow {
                 try {
                   $evt = $json | ConvertFrom-Json
                   if ($evt.kind -eq "progress") {
-                    $progressBar.IsIndeterminate = $false
-                    $progressBar.Value = [double]$evt.percent
+                    & $setProgressState ([double]$evt.percent) $false
                     & $setStatus ([string]$evt.status)
                   } elseif ($evt.kind -eq "log") {
                     & $appendLog ([string]$evt.message)
@@ -671,8 +683,7 @@ function Show-InstallerWindow {
             $state.Completed = $true
             $timer.Stop()
             if ($proc.ExitCode -eq 0 -and [string]::IsNullOrWhiteSpace($state.ErrorMessage)) {
-              $progressBar.IsIndeterminate = $false
-              $progressBar.Value = 100
+              & $setProgressState 100 $false
               & $setStatus (if ([string]::IsNullOrWhiteSpace($state.ResultVersion)) { "Done" } else { "Done: " + $state.ResultVersion })
               if (-not [string]::IsNullOrWhiteSpace($state.ResultInstallRoot)) {
                 & $appendLog ("Install success at " + $state.ResultInstallRoot)
@@ -683,7 +694,7 @@ function Show-InstallerWindow {
               [System.Windows.MessageBox]::Show("Install completed successfully.", "LAT Installer", "OK", "Information") | Out-Null
             } else {
               $msg = if ([string]::IsNullOrWhiteSpace($state.ErrorMessage)) { "Installer worker failed with exit code $($proc.ExitCode). See log: $workerLog" } else { $state.ErrorMessage }
-              $progressBar.IsIndeterminate = $false
+              & $setProgressState 0 $false
               & $setStatus "Failed"
               & $appendLog ("ERROR: " + $msg)
               & $setResult ("Installation failed: " + $msg) "error"
@@ -699,7 +710,7 @@ function Show-InstallerWindow {
             try { $timer.Stop() } catch {}
           }
           $msg = "GUI worker monitor failed: $($_.Exception.Message)"
-          $progressBar.IsIndeterminate = $false
+          & $setProgressState 0 $false
           & $setStatus "Failed"
           & $appendLog ("ERROR: " + $msg)
           & $appendLog (Format-ExceptionDetail $_)
@@ -711,7 +722,7 @@ function Show-InstallerWindow {
       }.GetNewClosure())
       $timer.Start()
     } catch {
-      $progressBar.IsIndeterminate = $false
+      & $setProgressState 0 $false
       & $setStatus "Failed"
       & $appendLog ("ERROR: Install click handler failed: " + $_.Exception.Message)
       & $appendLog (Format-ExceptionDetail $_)
