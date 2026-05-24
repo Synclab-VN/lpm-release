@@ -414,7 +414,10 @@ function Show-InstallerWindow {
 
     <TextBox Grid.Row="5" x:Name="LogBox" Margin="0,14,0,0" IsReadOnly="True" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto"/>
 
-    <TextBlock Grid.Row="6" Text="Tip: You can still run silent mode with -Silent" Foreground="Gray" Margin="0,10,0,0"/>
+    <StackPanel Grid.Row="6" Margin="0,10,0,0">
+      <TextBlock Text="Tip: You can still run silent mode with -Silent" Foreground="Gray"/>
+      <TextBlock x:Name="ResultText" Margin="0,6,0,0" Text="" FontWeight="SemiBold"/>
+    </StackPanel>
 
     <StackPanel Grid.Row="7" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,14,0,0">
       <Button x:Name="InstallButton" Content="Install" Width="110" Height="34" />
@@ -439,11 +442,12 @@ function Show-InstallerWindow {
   $startupTaskCheck = $window.FindName("StartupTaskCheck")
   $progressBar = $window.FindName("InstallProgress")
   $statusText = $window.FindName("StatusText")
+  $resultText = $window.FindName("ResultText")
   $logBox = $window.FindName("LogBox")
   $installButton = $window.FindName("InstallButton")
   $closeButton = $window.FindName("CloseButton")
   $browseButton = $window.FindName("BrowseButton")
-  if ($null -eq $window -or $null -eq $installButton -or $null -eq $statusText -or $null -eq $logBox -or $null -eq $channelBox) {
+  if ($null -eq $window -or $null -eq $installButton -or $null -eq $statusText -or $null -eq $resultText -or $null -eq $logBox -or $null -eq $channelBox) {
     throw "Installer GUI is missing required controls after XAML load."
   }
 
@@ -479,6 +483,39 @@ function Show-InstallerWindow {
     Append-InstallerLog $entry
   }
 
+  $setControlText = {
+    param($control, [string]$value)
+    if ($null -eq $control) { return $false }
+    if ($control.PSObject.Properties.Match("Text").Count -gt 0) {
+      $control.Text = $value
+      return $true
+    }
+    if ($control.PSObject.Properties.Match("Content").Count -gt 0) {
+      $control.Content = $value
+      return $true
+    }
+    return $false
+  }
+
+  $setStatus = {
+    param([string]$value)
+    if (-not (& $setControlText $statusText $value)) {
+      & $appendLog "WARN: Status control does not support Text/Content."
+    }
+  }
+
+  $setResult = {
+    param([string]$value, [string]$kind)
+    if (-not (& $setControlText $resultText $value)) { return }
+    if ($kind -eq "success") {
+      $resultText.Foreground = [System.Windows.Media.Brushes]::ForestGreen
+    } elseif ($kind -eq "error") {
+      $resultText.Foreground = [System.Windows.Media.Brushes]::Firebrick
+    } else {
+      $resultText.Foreground = [System.Windows.Media.Brushes]::Gray
+    }
+  }
+
   $browseButton.Add_Click({
     Add-Type -AssemblyName System.Windows.Forms
     $dialog = New-Object System.Windows.Forms.FolderBrowserDialog
@@ -495,7 +532,9 @@ function Show-InstallerWindow {
       $installButton.IsEnabled = $false
       $closeButton.IsEnabled = $false
       $progressBar.Value = 0
-      $statusText.Text = "Starting installer worker..."
+      $progressBar.IsIndeterminate = $true
+      & $setStatus "Starting installer worker..."
+      & $setResult "Installing... please wait." "info"
 
       $selectedItem = [System.Windows.Controls.ComboBoxItem]$channelBox.SelectedItem
       $selectedChannel = if ($null -ne $selectedItem -and -not [string]::IsNullOrWhiteSpace($selectedItem.Content)) { $selectedItem.Content.ToString() } else { "stable" }
@@ -518,8 +557,9 @@ function Show-InstallerWindow {
       $useRemoteWorkerScript = [string]::IsNullOrWhiteSpace($scriptPath)
       if ($useRemoteWorkerScript -and [string]::IsNullOrWhiteSpace($InstallerScriptUrl)) {
         $msg = "Cannot resolve installer script path for worker mode and InstallerScriptUrl is empty."
-        $statusText.Text = "Failed"
+        & $setStatus "Failed"
         & $appendLog "ERROR: $msg"
+        & $setResult ("Installation failed: " + $msg) "error"
         $installButton.IsEnabled = $true
         $closeButton.IsEnabled = $true
         [System.Windows.MessageBox]::Show($msg, "LAT Installer", "OK", "Error") | Out-Null
@@ -561,8 +601,9 @@ function Show-InstallerWindow {
         $proc = Start-Process -FilePath "powershell.exe" -ArgumentList $args -PassThru -WindowStyle Hidden -RedirectStandardOutput $workerStdOut -RedirectStandardError $workerStdErr
       } catch {
         $msg = "Failed to start installer worker: $($_.Exception.Message)"
-        $statusText.Text = "Failed"
+        & $setStatus "Failed"
         & $appendLog "ERROR: $msg"
+        & $setResult ("Installation failed: " + $msg) "error"
         $installButton.IsEnabled = $true
         $closeButton.IsEnabled = $true
         [System.Windows.MessageBox]::Show($msg, "LAT Installer", "OK", "Error") | Out-Null
@@ -594,8 +635,9 @@ function Show-InstallerWindow {
                 try {
                   $evt = $json | ConvertFrom-Json
                   if ($evt.kind -eq "progress") {
+                    $progressBar.IsIndeterminate = $false
                     $progressBar.Value = [double]$evt.percent
-                    $statusText.Text = [string]$evt.status
+                    & $setStatus ([string]$evt.status)
                   } elseif ($evt.kind -eq "log") {
                     & $appendLog ([string]$evt.message)
                   } elseif ($evt.kind -eq "result") {
@@ -629,18 +671,22 @@ function Show-InstallerWindow {
             $state.Completed = $true
             $timer.Stop()
             if ($proc.ExitCode -eq 0 -and [string]::IsNullOrWhiteSpace($state.ErrorMessage)) {
+              $progressBar.IsIndeterminate = $false
               $progressBar.Value = 100
-              $statusText.Text = if ([string]::IsNullOrWhiteSpace($state.ResultVersion)) { "Done" } else { "Done: " + $state.ResultVersion }
+              & $setStatus (if ([string]::IsNullOrWhiteSpace($state.ResultVersion)) { "Done" } else { "Done: " + $state.ResultVersion })
               if (-not [string]::IsNullOrWhiteSpace($state.ResultInstallRoot)) {
                 & $appendLog ("Install success at " + $state.ResultInstallRoot)
               } else {
                 & $appendLog "Install success."
               }
+              & $setResult "Installation completed successfully. You can close this window." "success"
               [System.Windows.MessageBox]::Show("Install completed successfully.", "LAT Installer", "OK", "Information") | Out-Null
             } else {
               $msg = if ([string]::IsNullOrWhiteSpace($state.ErrorMessage)) { "Installer worker failed with exit code $($proc.ExitCode). See log: $workerLog" } else { $state.ErrorMessage }
-              $statusText.Text = "Failed"
+              $progressBar.IsIndeterminate = $false
+              & $setStatus "Failed"
               & $appendLog ("ERROR: " + $msg)
+              & $setResult ("Installation failed: " + $msg) "error"
               [System.Windows.MessageBox]::Show("Install failed: $msg", "LAT Installer", "OK", "Error") | Out-Null
             }
             $installButton.IsEnabled = $true
@@ -653,9 +699,11 @@ function Show-InstallerWindow {
             try { $timer.Stop() } catch {}
           }
           $msg = "GUI worker monitor failed: $($_.Exception.Message)"
-          $statusText.Text = "Failed"
+          $progressBar.IsIndeterminate = $false
+          & $setStatus "Failed"
           & $appendLog ("ERROR: " + $msg)
           & $appendLog (Format-ExceptionDetail $_)
+          & $setResult ("Installation failed: " + $msg) "error"
           $installButton.IsEnabled = $true
           $closeButton.IsEnabled = $true
           [System.Windows.MessageBox]::Show($msg, "LAT Installer", "OK", "Error") | Out-Null
@@ -663,9 +711,11 @@ function Show-InstallerWindow {
       }.GetNewClosure())
       $timer.Start()
     } catch {
-      $statusText.Text = "Failed"
+      $progressBar.IsIndeterminate = $false
+      & $setStatus "Failed"
       & $appendLog ("ERROR: Install click handler failed: " + $_.Exception.Message)
       & $appendLog (Format-ExceptionDetail $_)
+      & $setResult ("Installation failed: " + $_.Exception.Message) "error"
       $installButton.IsEnabled = $true
       $closeButton.IsEnabled = $true
       [System.Windows.MessageBox]::Show("Install failed: " + $_.Exception.Message, "LAT Installer", "OK", "Error") | Out-Null
