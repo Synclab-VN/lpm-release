@@ -12,6 +12,7 @@ param(
   [switch]$WorkerMode,
   [switch]$Force,
   [string]$LogPath = "",
+  [string]$InstallerScriptUrl = "https://raw.githubusercontent.com/Synclab-VN/lpm-release/refs/heads/main/installer/windows/install-lat-agent.ps1",
   [string]$GitHubToken = ""
 )
 
@@ -514,8 +515,9 @@ function Show-InstallerWindow {
       if ([string]::IsNullOrWhiteSpace($scriptPath)) {
         $scriptPath = $MyInvocation.MyCommand.Path
       }
-      if ([string]::IsNullOrWhiteSpace($scriptPath)) {
-        $msg = "Cannot resolve installer script path for worker mode."
+      $useRemoteWorkerScript = [string]::IsNullOrWhiteSpace($scriptPath)
+      if ($useRemoteWorkerScript -and [string]::IsNullOrWhiteSpace($InstallerScriptUrl)) {
+        $msg = "Cannot resolve installer script path for worker mode and InstallerScriptUrl is empty."
         $statusText.Text = "Failed"
         & $appendLog "ERROR: $msg"
         $installButton.IsEnabled = $true
@@ -528,10 +530,7 @@ function Show-InstallerWindow {
       $workerStdErr = Join-Path $env:TEMP ("lat-installer-worker-err-" + [guid]::NewGuid().ToString("N") + ".log")
       $workerLog = if ([string]::IsNullOrWhiteSpace($script:InstallerLogPath)) { Get-DefaultLogPath } else { $script:InstallerLogPath }
 
-      $args = @(
-        "-NoProfile",
-        "-ExecutionPolicy", "Bypass",
-        "-File", $scriptPath,
+      $commonArgs = @(
         "-WorkerMode",
         "-Silent",
         "-ReleaseRepo", $config.ReleaseRepo,
@@ -540,11 +539,23 @@ function Show-InstallerWindow {
         "-InstallDir", $config.InstallDir,
         "-LogPath", $workerLog
       )
-      if (-not [string]::IsNullOrWhiteSpace($config.Tag)) { $args += @("-Tag", $config.Tag) }
-      if ($config.NoStart) { $args += "-NoStart" }
-      if ($config.NoDesktopShortcut) { $args += "-NoDesktopShortcut" }
-      if ($config.NoAutoStart) { $args += "-NoAutoStart" }
-      if (-not [string]::IsNullOrWhiteSpace($config.GitHubToken)) { $args += @("-GitHubToken", $config.GitHubToken) }
+      if (-not [string]::IsNullOrWhiteSpace($config.Tag)) { $commonArgs += @("-Tag", $config.Tag) }
+      if ($config.NoStart) { $commonArgs += "-NoStart" }
+      if ($config.NoDesktopShortcut) { $commonArgs += "-NoDesktopShortcut" }
+      if ($config.NoAutoStart) { $commonArgs += "-NoAutoStart" }
+      if (-not [string]::IsNullOrWhiteSpace($config.GitHubToken)) { $commonArgs += @("-GitHubToken", $config.GitHubToken) }
+
+      $args = @(
+        "-NoProfile",
+        "-ExecutionPolicy", "Bypass"
+      )
+      if ($useRemoteWorkerScript) {
+        $workerCommand = "& ([scriptblock]::Create((Invoke-RestMethod -Uri '" + $InstallerScriptUrl.Replace("'", "''") + "'))) " + (($commonArgs | ForEach-Object { if ($_ -match '\s') { '"' + $_.Replace('"', '""') + '"' } else { $_ } }) -join " ")
+        $args += @("-Command", $workerCommand)
+      } else {
+        $args += @("-File", $scriptPath)
+        $args += $commonArgs
+      }
 
       try {
         $proc = Start-Process -FilePath "powershell.exe" -ArgumentList $args -PassThru -WindowStyle Hidden -RedirectStandardOutput $workerStdOut -RedirectStandardError $workerStdErr
