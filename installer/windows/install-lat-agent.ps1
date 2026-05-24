@@ -22,7 +22,7 @@ $script:ProgressTotal = 100
 $script:ProgressCurrent = 0
 $script:ProgressCallback = $null
 $script:EventPrefix = "__LAT_EVENT__:"
-$script:InstallerVersion = "1.0.4"
+$script:InstallerVersion = "1.0.5"
 $script:IsWorkerMode = [bool]$WorkerMode
 $script:InstallerLogPath = $LogPath
 $script:InstallerSessionId = [guid]::NewGuid().ToString("N").Substring(0, 8)
@@ -151,29 +151,19 @@ function ConvertFrom-LatInstallerEventLine([string]$Line) {
   }
 }
 
-function Invoke-LatInstallerUiUpdate($Window, [scriptblock]$Action, $LogBox = $null) {
-  if ($null -eq $Action) { return }
-  try {
-    if ($null -ne $Window -and $null -ne $Window.Dispatcher -and -not $Window.Dispatcher.CheckAccess()) {
-      [void]$Window.Dispatcher.Invoke([System.Action]{ & $Action })
-    } else {
-      & $Action
-    }
-  } catch {
-    Add-LatInstallerGuiLog $LogBox ("ERROR: GUI UI update failed: " + $_.Exception.Message)
-  }
-}
-
 function Set-LatInstallerCompletedUi($Window, [string]$Version, [string]$InstallRoot, [bool]$Success, [string]$Message) {
   $logBox = $null
+  if ($null -eq $Window) {
+    Add-LatInstallerGuiLog $logBox "ERROR: Completed UI update skipped: window is null"
+    return
+  }
+
   try {
-    if ($null -ne $Window) {
-      $logBox = $Window.FindName("LogBox")
-    }
+    $logBox = $Window.FindName("LogBox")
   } catch {
   }
 
-  Invoke-LatInstallerUiUpdate $Window {
+  try {
     $progress = $Window.FindName("InstallProgress")
     $status = $Window.FindName("StatusText")
     $result = $Window.FindName("ResultText")
@@ -194,27 +184,24 @@ function Set-LatInstallerCompletedUi($Window, [string]$Version, [string]$Install
       $progressValue = 100
     }
 
-    if ($null -ne $progress) {
-      $progress.IsIndeterminate = $false
-      $progress.Value = $progressValue
+    Set-LatInstallerProgressState $progress $progressValue $false
+    Set-LatInstallerStatus $status $logBox $statusTextValue
+    Set-LatInstallerControlText $result $resultTextValue | Out-Null
+    try {
+      if ($null -ne $result) {
+        $result.Foreground = $resultBrush
+      }
+    } catch {
     }
-    if ($null -ne $status) {
-      $status.Text = $statusTextValue
-    }
-    if ($null -ne $result) {
-      $result.Text = $resultTextValue
-      $result.Foreground = $resultBrush
-    }
-    if ($null -ne $install) {
-      $install.IsEnabled = $true
-    }
-    if ($null -ne $close) {
-      $close.IsEnabled = $true
-    }
+    Set-LatInstallerControlEnabled $install $true
+    Set-LatInstallerControlEnabled $close $true
+
     if (-not [string]::IsNullOrWhiteSpace($InstallRoot)) {
       Add-LatInstallerGuiLog $logBox ("Install success at " + $InstallRoot)
     }
-  } $logBox
+  } catch {
+    Add-LatInstallerGuiLog $logBox ("ERROR: Completed UI update failed: " + $_.Exception.Message)
+  }
 
   try {
     if ($null -ne $Window -and $null -ne $Window.Dispatcher) {
