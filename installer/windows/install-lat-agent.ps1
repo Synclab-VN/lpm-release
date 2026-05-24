@@ -22,7 +22,7 @@ $script:ProgressTotal = 100
 $script:ProgressCurrent = 0
 $script:ProgressCallback = $null
 $script:EventPrefix = "__LAT_EVENT__:"
-$script:InstallerVersion = "1.0.5"
+$script:InstallerVersion = "1.0.6"
 $script:IsWorkerMode = [bool]$WorkerMode
 $script:InstallerLogPath = $LogPath
 $script:InstallerSessionId = [guid]::NewGuid().ToString("N").Substring(0, 8)
@@ -151,24 +151,24 @@ function ConvertFrom-LatInstallerEventLine([string]$Line) {
   }
 }
 
-function Set-LatInstallerCompletedUi($Window, [string]$Version, [string]$InstallRoot, [bool]$Success, [string]$Message) {
+function Set-LatInstallerCompletedUi($UiContext, [string]$Version, [string]$InstallRoot, [bool]$Success, [string]$Message) {
   $logBox = $null
-  if ($null -eq $Window) {
-    Add-LatInstallerGuiLog $logBox "ERROR: Completed UI update skipped: window is null"
+  if ($null -eq $UiContext) {
+    Add-LatInstallerGuiLog $logBox "ERROR: Completed UI update skipped: ui context is null"
     return
   }
 
   try {
-    $logBox = $Window.FindName("LogBox")
+    $logBox = $UiContext.LogBox
   } catch {
   }
 
   try {
-    $progress = $Window.FindName("InstallProgress")
-    $status = $Window.FindName("StatusText")
-    $result = $Window.FindName("ResultText")
-    $install = $Window.FindName("InstallButton")
-    $close = $Window.FindName("CloseButton")
+    $progress = $UiContext.ProgressBar
+    $status = $UiContext.StatusText
+    $result = $UiContext.ResultText
+    $install = $UiContext.InstallButton
+    $close = $UiContext.CloseButton
 
     $statusTextValue = "Failed"
     $resultTextValue = $Message
@@ -196,6 +196,12 @@ function Set-LatInstallerCompletedUi($Window, [string]$Version, [string]$Install
     Set-LatInstallerControlEnabled $install $true
     Set-LatInstallerControlEnabled $close $true
 
+    if ($null -eq $progress) { Add-LatInstallerGuiLog $logBox "WARN: Completed UI update missing control: InstallProgress" }
+    if ($null -eq $status) { Add-LatInstallerGuiLog $logBox "WARN: Completed UI update missing control: StatusText" }
+    if ($null -eq $result) { Add-LatInstallerGuiLog $logBox "WARN: Completed UI update missing control: ResultText" }
+    if ($null -eq $install) { Add-LatInstallerGuiLog $logBox "WARN: Completed UI update missing control: InstallButton" }
+    if ($null -eq $close) { Add-LatInstallerGuiLog $logBox "WARN: Completed UI update missing control: CloseButton" }
+
     if (-not [string]::IsNullOrWhiteSpace($InstallRoot)) {
       Add-LatInstallerGuiLog $logBox ("Install success at " + $InstallRoot)
     }
@@ -204,8 +210,8 @@ function Set-LatInstallerCompletedUi($Window, [string]$Version, [string]$Install
   }
 
   try {
-    if ($null -ne $Window -and $null -ne $Window.Dispatcher) {
-      [void]$Window.Dispatcher.Invoke([System.Action]{}, [System.Windows.Threading.DispatcherPriority]::Render)
+    if ($null -ne $UiContext.Dispatcher) {
+      [void]$UiContext.Dispatcher.Invoke([System.Action]{}, [System.Windows.Threading.DispatcherPriority]::Render)
     }
   } catch {
   }
@@ -619,6 +625,15 @@ function Show-InstallerWindow {
   $installButton = $window.FindName("InstallButton")
   $closeButton = $window.FindName("CloseButton")
   $browseButton = $window.FindName("BrowseButton")
+  $uiContext = [pscustomobject]@{
+    ProgressBar = $progressBar
+    StatusText = $statusText
+    ResultText = $resultText
+    LogBox = $logBox
+    InstallButton = $installButton
+    CloseButton = $closeButton
+    Dispatcher = $window.Dispatcher
+  }
   if ($null -eq $window -or $null -eq $installButton -or $null -eq $statusText -or $null -eq $resultText -or $null -eq $logBox -or $null -eq $channelBox) {
     throw "Installer GUI is missing required controls after XAML load."
   }
@@ -804,13 +819,13 @@ function Show-InstallerWindow {
             $hasResult = (-not [string]::IsNullOrWhiteSpace($state.ResultVersion)) -or (-not [string]::IsNullOrWhiteSpace($state.ResultInstallRoot))
             $isSuccess = [string]::IsNullOrWhiteSpace($state.ErrorMessage) -and (($proc.ExitCode -eq 0) -or ([string]::IsNullOrWhiteSpace($exitCodeText) -and $hasResult))
             if ($isSuccess) {
-              Set-LatInstallerCompletedUi $window $state.ResultVersion $state.ResultInstallRoot $true ""
+              Set-LatInstallerCompletedUi $uiContext $state.ResultVersion $state.ResultInstallRoot $true ""
               [System.Windows.MessageBox]::Show("Install completed successfully.", "LAT Installer", "OK", "Information") | Out-Null
             } else {
               $displayExitCode = if ([string]::IsNullOrWhiteSpace($exitCodeText)) { "unknown" } else { $exitCodeText }
               $msg = if ([string]::IsNullOrWhiteSpace($state.ErrorMessage)) { "Installer worker failed with exit code $displayExitCode. See log: $workerLog" } else { $state.ErrorMessage }
               Add-LatInstallerGuiLog $logBox ("ERROR: " + $msg)
-              Set-LatInstallerCompletedUi $window "" "" $false ("Installation failed: " + $msg)
+              Set-LatInstallerCompletedUi $uiContext "" "" $false ("Installation failed: " + $msg)
               [System.Windows.MessageBox]::Show("Install failed: $msg", "LAT Installer", "OK", "Error") | Out-Null
             }
             try { Remove-Item -LiteralPath $workerStdOut -Force -ErrorAction SilentlyContinue } catch {}
@@ -823,7 +838,7 @@ function Show-InstallerWindow {
           $msg = "GUI worker monitor failed: $($_.Exception.Message)"
           Add-LatInstallerGuiLog $logBox ("ERROR: " + $msg)
           Add-LatInstallerGuiLog $logBox (Format-ExceptionDetail $_)
-          Set-LatInstallerCompletedUi $window "" "" $false ("Installation failed: " + $msg)
+          Set-LatInstallerCompletedUi $uiContext "" "" $false ("Installation failed: " + $msg)
           [System.Windows.MessageBox]::Show($msg, "LAT Installer", "OK", "Error") | Out-Null
         }
   }.GetNewClosure())
