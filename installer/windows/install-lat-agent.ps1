@@ -22,7 +22,7 @@ $script:ProgressTotal = 100
 $script:ProgressCurrent = 0
 $script:ProgressCallback = $null
 $script:EventPrefix = "__LAT_EVENT__:"
-$script:InstallerVersion = "1.0.3"
+$script:InstallerVersion = "1.0.4"
 $script:IsWorkerMode = [bool]$WorkerMode
 $script:InstallerLogPath = $LogPath
 $script:InstallerSessionId = [guid]::NewGuid().ToString("N").Substring(0, 8)
@@ -148,6 +148,79 @@ function ConvertFrom-LatInstallerEventLine([string]$Line) {
     return [pscustomobject]@{ IsEvent = $true; Event = ($json | ConvertFrom-Json); Error = $null }
   } catch {
     return [pscustomobject]@{ IsEvent = $true; Event = $null; Error = $_.Exception.Message }
+  }
+}
+
+function Invoke-LatInstallerUiUpdate($Window, [scriptblock]$Action, $LogBox = $null) {
+  if ($null -eq $Action) { return }
+  try {
+    if ($null -ne $Window -and $null -ne $Window.Dispatcher -and -not $Window.Dispatcher.CheckAccess()) {
+      [void]$Window.Dispatcher.Invoke([System.Action]{ & $Action })
+    } else {
+      & $Action
+    }
+  } catch {
+    Add-LatInstallerGuiLog $LogBox ("ERROR: GUI UI update failed: " + $_.Exception.Message)
+  }
+}
+
+function Set-LatInstallerCompletedUi($Window, [string]$Version, [string]$InstallRoot, [bool]$Success, [string]$Message) {
+  $logBox = $null
+  try {
+    if ($null -ne $Window) {
+      $logBox = $Window.FindName("LogBox")
+    }
+  } catch {
+  }
+
+  Invoke-LatInstallerUiUpdate $Window {
+    $progress = $Window.FindName("InstallProgress")
+    $status = $Window.FindName("StatusText")
+    $result = $Window.FindName("ResultText")
+    $install = $Window.FindName("InstallButton")
+    $close = $Window.FindName("CloseButton")
+
+    $statusTextValue = "Failed"
+    $resultTextValue = $Message
+    $resultBrush = [System.Windows.Media.Brushes]::Firebrick
+    $progressValue = 0
+    if ($Success) {
+      $statusTextValue = "Done"
+      if (-not [string]::IsNullOrWhiteSpace($Version)) {
+        $statusTextValue = "Done: " + $Version
+      }
+      $resultTextValue = "Installation completed successfully. You can close this window."
+      $resultBrush = [System.Windows.Media.Brushes]::ForestGreen
+      $progressValue = 100
+    }
+
+    if ($null -ne $progress) {
+      $progress.IsIndeterminate = $false
+      $progress.Value = $progressValue
+    }
+    if ($null -ne $status) {
+      $status.Text = $statusTextValue
+    }
+    if ($null -ne $result) {
+      $result.Text = $resultTextValue
+      $result.Foreground = $resultBrush
+    }
+    if ($null -ne $install) {
+      $install.IsEnabled = $true
+    }
+    if ($null -ne $close) {
+      $close.IsEnabled = $true
+    }
+    if (-not [string]::IsNullOrWhiteSpace($InstallRoot)) {
+      Add-LatInstallerGuiLog $logBox ("Install success at " + $InstallRoot)
+    }
+  } $logBox
+
+  try {
+    if ($null -ne $Window -and $null -ne $Window.Dispatcher) {
+      [void]$Window.Dispatcher.Invoke([System.Action]{}, [System.Windows.Threading.DispatcherPriority]::Render)
+    }
+  } catch {
   }
 }
 
@@ -744,30 +817,15 @@ function Show-InstallerWindow {
             $hasResult = (-not [string]::IsNullOrWhiteSpace($state.ResultVersion)) -or (-not [string]::IsNullOrWhiteSpace($state.ResultInstallRoot))
             $isSuccess = [string]::IsNullOrWhiteSpace($state.ErrorMessage) -and (($proc.ExitCode -eq 0) -or ([string]::IsNullOrWhiteSpace($exitCodeText) -and $hasResult))
             if ($isSuccess) {
-              Set-LatInstallerProgressState $progressBar 100 $false
-              $doneStatus = "Done"
-              if (-not [string]::IsNullOrWhiteSpace($state.ResultVersion)) {
-                $doneStatus = "Done: " + $state.ResultVersion
-              }
-              Set-LatInstallerStatus $statusText $logBox $doneStatus
-              if (-not [string]::IsNullOrWhiteSpace($state.ResultInstallRoot)) {
-                Add-LatInstallerGuiLog $logBox ("Install success at " + $state.ResultInstallRoot)
-              } else {
-                Add-LatInstallerGuiLog $logBox "Install success."
-              }
-              Set-LatInstallerResult $resultText "Installation completed successfully. You can close this window." "success"
+              Set-LatInstallerCompletedUi $window $state.ResultVersion $state.ResultInstallRoot $true ""
               [System.Windows.MessageBox]::Show("Install completed successfully.", "LAT Installer", "OK", "Information") | Out-Null
             } else {
               $displayExitCode = if ([string]::IsNullOrWhiteSpace($exitCodeText)) { "unknown" } else { $exitCodeText }
               $msg = if ([string]::IsNullOrWhiteSpace($state.ErrorMessage)) { "Installer worker failed with exit code $displayExitCode. See log: $workerLog" } else { $state.ErrorMessage }
-              Set-LatInstallerProgressState $progressBar 0 $false
-              Set-LatInstallerStatus $statusText $logBox "Failed"
               Add-LatInstallerGuiLog $logBox ("ERROR: " + $msg)
-              Set-LatInstallerResult $resultText ("Installation failed: " + $msg) "error"
+              Set-LatInstallerCompletedUi $window "" "" $false ("Installation failed: " + $msg)
               [System.Windows.MessageBox]::Show("Install failed: $msg", "LAT Installer", "OK", "Error") | Out-Null
             }
-            Set-LatInstallerControlEnabled $installButton $true
-            Set-LatInstallerControlEnabled $closeButton $true
             try { Remove-Item -LiteralPath $workerStdOut -Force -ErrorAction SilentlyContinue } catch {}
             try { Remove-Item -LiteralPath $workerStdErr -Force -ErrorAction SilentlyContinue } catch {}
           }
@@ -776,13 +834,9 @@ function Show-InstallerWindow {
             try { $timer.Stop() } catch {}
           }
           $msg = "GUI worker monitor failed: $($_.Exception.Message)"
-          Set-LatInstallerProgressState $progressBar 0 $false
-          Set-LatInstallerStatus $statusText $logBox "Failed"
           Add-LatInstallerGuiLog $logBox ("ERROR: " + $msg)
           Add-LatInstallerGuiLog $logBox (Format-ExceptionDetail $_)
-          Set-LatInstallerResult $resultText ("Installation failed: " + $msg) "error"
-          Set-LatInstallerControlEnabled $installButton $true
-          Set-LatInstallerControlEnabled $closeButton $true
+          Set-LatInstallerCompletedUi $window "" "" $false ("Installation failed: " + $msg)
           [System.Windows.MessageBox]::Show($msg, "LAT Installer", "OK", "Error") | Out-Null
         }
   }.GetNewClosure())
