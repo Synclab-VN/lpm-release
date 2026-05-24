@@ -446,15 +446,20 @@ function Show-InstallerWindow {
     throw "Installer GUI is missing required controls after XAML load."
   }
 
-  $window.Dispatcher.UnhandledException += {
-    param($sender, $e)
-    Write-Info ("GUI unhandled exception: " + $e.Exception.Message)
-    if ($null -ne $e.Exception) {
-      if (-not [string]::IsNullOrWhiteSpace($e.Exception.StackTrace)) {
-        Append-InstallerLog ("UnhandledStackTrace: " + $e.Exception.StackTrace)
+  try {
+    $unhandledHandler = [System.Windows.Threading.DispatcherUnhandledExceptionEventHandler]{
+      param($sender, $e)
+      Write-Info ("GUI unhandled exception: " + $e.Exception.Message)
+      if ($null -ne $e.Exception) {
+        if (-not [string]::IsNullOrWhiteSpace($e.Exception.StackTrace)) {
+          Append-InstallerLog ("UnhandledStackTrace: " + $e.Exception.StackTrace)
+        }
       }
+      $e.Handled = $true
     }
-    $e.Handled = $true
+    $window.Dispatcher.add_UnhandledException($unhandledHandler)
+  } catch {
+    Write-Info ("Warning: failed to hook GUI unhandled exception handler: " + $_.Exception.Message)
   }
 
   $installDirBox.Text = $InstallDir
